@@ -1,30 +1,58 @@
 import fs from "fs";
 import path from "path";
+import http from 'http';
 import crypto from "crypto";
 import { fileURLToPath } from "url";
 const BAIDU_ENDPOINT = "http://data.zz.baidu.com/urls"; // 百度官方接口仅支持 http
-async function pushToBaidu({ urls, token, site, logger, }) {
-    const baiduUrl = `${BAIDU_ENDPOINT}?site=${encodeURIComponent(site)}&token=${encodeURIComponent(token)}`;
-    const bodyText = urls.join("\n");
-    logger.info(`[astro-indexnow] pushing ${urls.length} URLs to Baidu`);
-    try {
-        const response = await fetch(baiduUrl, {
-            method: "POST",
-            headers: { "Content-Type": "text/plain" },
-            body: bodyText,
+async function pushToBaidu({ urls, token, site, logger }) {
+    const bodyText = urls.join('\n');
+    // 注意：直接拼接，不要用 encodeURIComponent
+    const path = `/urls?site=${site}&token=${token}`;
+
+    logger.info(`[baidu] pushing ${urls.length} URLs`);
+    logger.debug(`[baidu] body:\n${bodyText}`);
+
+    return new Promise((resolve, reject) => {
+        const req = http.request(
+            {
+                hostname: 'data.zz.baidu.com',
+                port: 80,
+                method: 'POST',
+                path,
+                headers: {
+                    'Content-Type': 'text/plain',
+                    'Content-Length': Buffer.byteLength(bodyText),
+                },
+            },
+            (res) => {
+                let data = '';
+                res.on('data', chunk => (data += chunk));
+                res.on('end', () => {
+                    try {
+                        const result = JSON.parse(data);
+                        if (res.statusCode === 200) {
+                            logger.info(`[baidu] success: remain=${result.remain}, success=${result.success}`);
+                            resolve(result);
+                        } else {
+                            logger.warn(`[baidu] push failed (HTTP ${res.statusCode}): ${data}`);
+                            resolve(null);   // 也可 reject，按你的业务需求
+                        }
+                    } catch (e) {
+                        logger.warn(`[baidu] invalid JSON response: ${data}`);
+                        resolve(null);
+                    }
+                });
+            }
+        );
+
+        req.on('error', (err) => {
+            logger.error(`[baidu] network error: ${err.message}`);
+            reject(err);
         });
-        if (response.ok) {
-            const result = await response.json();
-            // 典型返回：{"remain": 剩余配额, "success": 成功推送数量}
-            logger.info(`[astro-indexnow] Baidu push result: ${JSON.stringify(result)}`);
-        }
-        else {
-            logger.warn(`[astro-indexnow] Baidu push failed (HTTP ${response.status})`);
-        }
-    }
-    catch (err) {
-        logger.warn(`[astro-indexnow] Baidu push network error: ${err.message}`);
-    }
+
+        req.write(bodyText);
+        req.end();
+    });
 }
 /* =========================================================
    主集成入口
