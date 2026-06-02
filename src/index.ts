@@ -9,12 +9,74 @@ export interface IndexNowOptions {
   siteUrl?: string;
   enabled?: boolean;
   cacheDir?: string;
+  /** 百度资源平台推送配置 */
+  baidu?: {
+    token: string;
+    site?: string;
+    enabled?: boolean;
+  };
 }
+
+/* =========================================================
+   百度资源平台推送（独立封装）
+   ========================================================= */
+
+interface BaiduPushParams {
+  urls: string[];
+  token: string;
+  site: string;
+  logger: any;
+}
+
+const BAIDU_ENDPOINT = "http://data.zz.baidu.com/urls"; // 百度官方接口仅支持 http
+
+async function pushToBaidu({
+  urls,
+  token,
+  site,
+  logger,
+}: BaiduPushParams): Promise<void> {
+  const baiduUrl = `${BAIDU_ENDPOINT}?site=${encodeURIComponent(site)}&token=${encodeURIComponent(token)}`;
+  const bodyText = urls.join("\n");
+
+  logger.info(`[astro-indexnow] pushing ${urls.length} URLs to Baidu`);
+
+  try {
+    const response = await fetch(baiduUrl, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" },
+      body: bodyText,
+    });
+
+    if (response.ok) {
+      const result = await response.json();
+      // 典型返回：{"remain": 剩余配额, "success": 成功推送数量}
+      logger.info(
+        `[astro-indexnow] Baidu push result: ${JSON.stringify(result)}`
+      );
+    } else {
+      logger.warn(
+        `[astro-indexnow] Baidu push failed (HTTP ${response.status})`
+      );
+    }
+  } catch (err) {
+    logger.warn(
+      `[astro-indexnow] Baidu push network error: ${(err as Error).message}`
+    );
+  }
+}
+
+/* =========================================================
+   主集成入口
+   ========================================================= */
 
 export default function indexNow(
   options: IndexNowOptions = {}
 ): AstroIntegration {
   let site: string | null = null;
+  let baiduToken: string | null = null;
+  let baiduSite: string | null = null;
+  let baiduEnabled = true;
 
   const CACHE_FILENAME = ".astro-indexnow-cache.json";
   const projectRoot = process.cwd();
@@ -23,7 +85,7 @@ export default function indexNow(
     : path.join(projectRoot, CACHE_FILENAME);
 
   const INDEXNOW_ENDPOINT = "https://api.indexnow.org/indexnow";
-  const INDEXNOW_BATCH_SIZE = 10_000;
+  const INDEXNOW_BATCH_SIZE = 2_000;
 
   /* =========================================================
      Helpers
@@ -37,9 +99,7 @@ export default function indexNow(
     }
 
     const exists = fs.existsSync(cachePath);
-    logger.debug(
-      `[astro-indexnow] cache exists: ${exists} (${cachePath})`
-    );
+    logger.debug(`[astro-indexnow] cache exists: ${exists} (${cachePath})`);
 
     if (!exists) {
       logger.debug("[astro-indexnow] creating cache file");
@@ -93,9 +153,20 @@ export default function indexNow(
           options.siteUrl ??
           (config.site ? config.site.replace(/\/$/, "") : null);
 
-        logger.debug(
-          `[astro-indexnow] project root: ${projectRoot}`
-        );
+        // 提取百度推送配置
+        if (options.baidu) {
+          baiduToken = options.baidu.token || null;
+          baiduSite = options.baidu.site ?? site;
+          baiduEnabled = options.baidu.enabled !== false;
+
+          if (!baiduToken) {
+            logger.warn(
+              "[astro-indexnow] Baidu token is empty, push disabled"
+            );
+          }
+        }
+
+        logger.debug(`[astro-indexnow] project root: ${projectRoot}`);
 
         ensureCacheFile(logger);
       },
@@ -104,6 +175,7 @@ export default function indexNow(
          Build done
          ----------------------------------------------- */
       "astro:build:done": async ({ dir, logger }) => {
+        // IndexNow 开关检查
         if (options.enabled === false) {
           logger.info("[astro-indexnow] disabled");
           return;
@@ -119,17 +191,24 @@ export default function indexNow(
 
         ensureCacheFile(logger);
 
-        const outDir = fileURLToPath(dir instanceof URL ? dir : new URL(dir));
+        // dir 在 Astro 中始终为 URL 类型
+        const outDir = fileURLToPath(dir);
 
         const previousCache = loadCache(logger);
         const nextCache: Record<string, string> = {};
         const changedUrls: string[] = [];
 
+        // 递归遍历构建产物，收集变更的 index.html 页面
         function walk(currentDir: string) {
-          for (const entry of fs.readdirSync(currentDir, { withFileTypes: true })) {
+          for (const entry of fs.readdirSync(currentDir, {
+            withFileTypes: true,
+          })) {
             const fullPath = path.join(currentDir, entry.name);
 
-            if (entry.isDirectory()) walk(fullPath);
+            if (entry.isDirectory()) {
+              walk(fullPath);
+              continue;
+            }
 
             if (entry.isFile() && entry.name === "index.html") {
               const relativePath = path
@@ -137,10 +216,9 @@ export default function indexNow(
                 .replace(/index\.html$/, "")
                 .replace(/\\/g, "/");
 
-              const url =
-                site + "/" + relativePath.replace(/^\/+/, "");
-
+              const url = site + "/" + relativePath.replace(/^\/+/, "");
               const hash = hashFile(fullPath);
+
               nextCache[url] = hash;
 
               if (previousCache[url] !== hash) {
@@ -152,6 +230,7 @@ export default function indexNow(
 
         walk(outDir);
 
+        // 输出每个页面的变更状态
         logger.debug("[astro-indexnow] page diff:");
         for (const url of Object.keys(nextCache)) {
           const state =
@@ -161,6 +240,7 @@ export default function indexNow(
           logger.debug(` - ${url} (${state})`);
         }
 
+        // 无变更则跳过所有提交
         if (changedUrls.length === 0) {
           logger.info(
             "[astro-indexnow] no changed URLs detected, skipping submission"
@@ -169,11 +249,16 @@ export default function indexNow(
           return;
         }
 
+        /* -----------------------------------------------
+           IndexNow 批量提交
+           ----------------------------------------------- */
         const batches = chunk(changedUrls, INDEXNOW_BATCH_SIZE);
 
         logger.info(
           `[astro-indexnow] submitting ${changedUrls.length} changed URLs in ${batches.length} batch(es)`
         );
+
+        let anyBatchFailed = false;
 
         for (let i = 0; i < batches.length; i++) {
           const batch = batches[i];
@@ -195,22 +280,50 @@ export default function indexNow(
             });
 
             if (!response.ok) {
+              anyBatchFailed = true;
               logger.warn(
-                `[astro-indexnow] batch ${i + 1} failed (${response.status})`
+                `[astro-indexnow] batch ${i + 1}/${batches.length} failed (HTTP ${response.status})`
+              );
+            } else {
+              logger.debug(
+                `[astro-indexnow] batch ${i + 1}/${batches.length} submitted successfully`
               );
             }
-          } catch {
+          } catch (err) {
+            anyBatchFailed = true;
             logger.warn(
-              `[astro-indexnow] batch ${i + 1} submission failed (network error)`
+              `[astro-indexnow] batch ${i + 1}/${batches.length} network error: ${(err as Error).message}`
             );
           }
         }
 
-        saveCache(logger, nextCache);
+        // 仅在全部批次成功时更新缓存，保证失败的 URL 下次构建可重试
+        if (!anyBatchFailed) {
+          saveCache(logger, nextCache);
+          logger.info("[astro-indexnow] IndexNow submission complete");
+        } else {
+          logger.warn(
+            "[astro-indexnow] some batches failed, cache not updated — will retry on next build"
+          );
+        }
 
-        logger.info(
-          `[astro-indexnow] IndexNow submission complete`
-        );
+        /* -----------------------------------------------
+           百度资源平台推送
+           ----------------------------------------------- */
+        if (baiduEnabled && baiduToken) {
+          if (!baiduSite) {
+            logger.warn(
+              "[astro-indexnow] Baidu site URL missing, skipping push"
+            );
+          } else {
+            await pushToBaidu({
+              urls: changedUrls,
+              token: baiduToken,
+              site: baiduSite,
+              logger,
+            });
+          }
+        }
       },
     },
   };
