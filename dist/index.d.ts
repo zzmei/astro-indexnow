@@ -11,8 +11,6 @@ export interface IndexNowOptions {
         site?: string;
         /** 百度推送开关，默认 true */
         enabled?: boolean;
-        /** 每日推送配额上限，默认 10 */
-        quota?: number;
     };
 }
 export default function indexNow(options?: IndexNowOptions): AstroIntegration;
