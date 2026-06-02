@@ -18,7 +18,7 @@ export interface IndexNowOptions {
   };
 }
 
-async function pushToBaidu({ urls, token, site, logger }) {
+async function pushToBaidu(urls, token, site, logger) {
     const bodyText = urls.join('\n');
     const path = `/urls?site=${site}&token=${token}`;
 
@@ -318,7 +318,7 @@ export default function indexNow(
               "[astro-indexnow] Baidu site URL missing, skipping push"
             );
           } else {
-            await pushToBaidu({changedUrls,baiduToken,baiduSite,logger});
+            await pushToBaidu(changedUrls,baiduToken,baiduSite,logger);
           }
         }
       },
