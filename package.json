@@ -31,11 +31,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/velohost/astro-indexnow.git"
+    "url": "git+https://github.com/zzmei/astro-indexnow.git"
   },
-  "homepage": "https://velohost.co.uk/astro-indexnow",
   "bugs": {
-    "url": "https://github.com/velohost/astro-indexnow/issues"
+    "url": "https://github.com/zzmei/astro-indexnow/issues"
   },
   "license": "MIT",
   "engines": {
