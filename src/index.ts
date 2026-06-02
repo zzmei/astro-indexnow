@@ -60,7 +60,6 @@ async function pushToBaidu({
   const reqPath = `/urls?site=${site}&token=${token}`;
 
   logger.info(`[astro-indexnow] Baidu pushing ${urls.length} URLs`);
-  logger.debug(`[astro-indexnow] Baidu request path: ${reqPath}`);
 
   return new Promise((resolve) => {
     const req = http.request(
